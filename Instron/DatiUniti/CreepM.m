@@ -163,20 +163,6 @@ Delta_R_su_R0 = Delta_R / R0; % Spesso in letteratura si usa (Delta R / R0)
 Dati_Completi.Delta_R_su_R0 = Delta_R_su_R0;
 
 
-% === PLOT FINALE (Forza e Delta R) ===
-figure()
-yyaxis left
-plot(Dati_Completi.Tempo, Dati_Completi.Forza, '-g', 'LineWidth', 1.5);
-ylabel('Forza (N)');
-
-yyaxis right
-% Plottiamo Delta_R_su_R0 perché è il parametro standard per i sensori
-plot(Dati_Completi.Tempo, Dati_Completi.Delta_R_su_R0, '-k', 'LineWidth', 1.5);
-ylabel('\Delta R / R_0');
-
-xlabel('Tempo della Prova (s)');
-title('Confronto tra Forza Applicata e Risposta del Sensore (\DeltaR/R_0)');
-grid on;
 %% Salvo il risultato
 writetable(Dati_Completi, file_output);
 disp(['Dati tagliati e salvati con successo in: ', file_output]);
@@ -221,25 +207,60 @@ R_sensore_ex = R_fissa .* (voltaggio_reale_esteso ./ (V0 - voltaggio_reale_estes
 Delta_R_ex = R_sensore_ex - R0;
 Delta_R_su_R0_ex = Delta_R_ex / R0; 
 
-% === PLOT FINALE ===
-figure()
+% === 3. AGGIUNTA DEI 30 SECONDI A ZERO (BASELINE) ===
+% Ricavo il dt e creo un vettore tempo che parte da -30s fino all'inizio dei dati
+dt_meccanico = Dati_Completi.Tempo(2) - Dati_Completi.Tempo(1);
+tempo_zeri = (Dati_Completi.Tempo(1) - 30 : dt_meccanico : Dati_Completi.Tempo(1) - dt_meccanico)';
 
+% Creo i vettori di zeri (piatti) per la baseline
+forza_zeri = zeros(length(tempo_zeri), 1);
+delta_r_zeri = zeros(length(tempo_zeri), 1);
+
+% Unisco tutti i pezzi (Baseline + Dati Originali + Coda Copiata) per avere linee continue
+tempo_totale = [tempo_zeri; Dati_Completi.Tempo; tempo_esteso];
+forza_totale = [forza_zeri; Dati_Completi.Forza; forza_estesa];
+delta_r_totale = [delta_r_zeri; Dati_Completi.Delta_R_su_R0; Delta_R_su_R0_ex];
+
+% === 4. IDENTIFICAZIONE DEI 4 PICCHI (3 AUTOMATICI + 1 MANUALE) ===
+% 1. Troviamo i primi 3 picchi presenti nei dati originali
+[~, idx_picchi_originali] = findpeaks(Dati_Completi.Forza, 'MinPeakProminence', 0.5, 'NPeaks', 3);
+tempi_primi_tre = Dati_Completi.Tempo(idx_picchi_originali);
+
+% 2. INSERISCI QUI IL TEMPO DEL QUARTO PICCO (in secondi)
+tempo_quarto_picco_manuale = 185.13; % <--- CAMBIA QUESTO VALORE CON IL TEMPO REALE
+
+% Uniamo i tempi dei primi 3 con quello manuale
+tempi_picchi = [tempi_primi_tre; tempo_quarto_picco_manuale];
+
+% === PLOT GENERALE CON LINEE VERTICALI ===
+figure(6)
 % --- ASSE SINISTRO (FORZA) ---
 yyaxis left
-plot(Dati_Completi.Tempo, Dati_Completi.Forza, '-g', 'LineWidth', 1.5, 'DisplayName', 'Forza Originale');
+plot(tempo_totale, forza_totale, '-b', 'LineWidth', 1.5, 'DisplayName', 'Force');
+ylabel('Force [N]');
+ylim([-1, 8])
 hold on;
-plot(tempo_esteso, forza_estesa, '-g', 'LineWidth', 1.5, 'HandleVisibility', 'off'); % Coda copiata
-ylabel('Forza (N)');
+
+% Aggiunta delle linee verticali verdi con scritta orizzontale "+2.5%"
+for i = 1:length(tempi_picchi)
+    xline(tempi_picchi(i), '--g', '+2.5%', ...
+          'LabelVerticalAlignment', 'top', ...
+          'LabelHorizontalAlignment', 'center', ...
+          'LabelOrientation', 'horizontal', ... % Scritta orizzontale
+          'LineWidth', 1.2, ...
+          'HandleVisibility', 'off'); 
+end
+hold off;
 
 % --- ASSE DESTRO (VOLTAGGIO/SENSORE VERO) ---
 yyaxis right
-plot(Dati_Completi.Tempo, Dati_Completi.Delta_R_su_R0, '-k', 'LineWidth', 1.5, 'DisplayName', '\Delta R / R_0');
-hold on; % <--- Ricorda sempre questo hold on sull'asse destro!
-plot(tempo_esteso, Delta_R_su_R0_ex, '-k', 'LineWidth', 1.5, 'HandleVisibility', 'off'); % Dati reali che proseguono
-ylabel('\Delta R / R_0');
+plot(tempo_totale, delta_r_totale*100, '-r', 'LineWidth', 1.5, 'DisplayName', '\DeltaR/R_0');
+ylabel('\DeltaR/R_0 (%)');
 
-xlabel('Tempo della Prova (s)');
-title('Forza (con pezzo incollato) e Risposta del Sensore (dati completi reali)');
+% Formattazione del grafico
+xlabel('Time [s]');
+title('Mechanical and electrical response');
+subtitle('Medium length sensor')
 legend('show', 'Location', 'best');
 grid on;
-
+xlim([tempo_totale(1) tempo_totale(end)]);
