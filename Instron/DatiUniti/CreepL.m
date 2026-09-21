@@ -12,9 +12,10 @@ dt = 1 / frequenza; % Passo temporale (0.01 secondi)
 
 % === LETTURA DEL FILE ELETTRICO (.txt) ===
 dati2 = readmatrix(file_elettrico); 
-t2 = dati2(:, 1);
 voltaggio = dati2(:, 3);
 voltaggio = voltaggio*(10^(-6));
+t2 = ((0:length(voltaggio)-1)')/frequenza;
+
 
 % === LETTURA DEL FILE MECCANICO (.csv) ===
 opts = detectImportOptions(file_meccanico);
@@ -65,7 +66,7 @@ title('Filtraggio del Voltaggio (Savitzky-Golay)');
 grid on;
 
 % === SINCRONIZZAZIONE E TAGLIO DEL VOLTAGGIO ===
-tempo_inizio_voltaggio = 58; 
+tempo_inizio_voltaggio = 54; 
 [~, indice_inizio] = min(abs(t2 - tempo_inizio_voltaggio));
 N_campioni = length(t1);
 indice_fine = indice_inizio + N_campioni - 1;

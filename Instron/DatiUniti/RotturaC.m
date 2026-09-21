@@ -1,8 +1,12 @@
-clear; close all; clc;
+clear; 
+close all;
+clc;
+
 % === PERCORSI DEI FILE ===
-file_elettrico = "C:\Users\gdira\OneDrive\Documents\Magistrale\Laboratorio\Instron\Voltaggio\Serpentina\SerpentinaStatica6.txt"; 
-file_meccanico = "C:\Users\gdira\OneDrive\Documents\Magistrale\Laboratorio\Instron\Forza_Deformazione\SerpentineStatica.is_tens_Exports\SerpentineStatica_7.csv"; 
-file_output = 'dati_serpentina_statica5.csv'; 
+file_elettrico = "C:\Users\gdira\OneDrive\Documents\Magistrale\Laboratorio\Instron\Voltaggio\Corto\CortoRottura.txt"; 
+file_meccanico = "C:\Users\gdira\OneDrive\Documents\Magistrale\Laboratorio\Instron\Forza_Deformazione\Cortorottura.is_tens_Exports\CortoRottura_2.csv"; 
+file_output = 'dati_corto_rottura.csv'; 
+
 frequenza = 100; % Hz
 dt = 1 / frequenza; % Passo temporale (0.01 secondi)
 
@@ -10,11 +14,16 @@ dt = 1 / frequenza; % Passo temporale (0.01 secondi)
 dati2 = readmatrix(file_elettrico); 
 t2 = dati2(:, 1);
 voltaggio = dati2(:, 3);
-voltaggio = voltaggio*(10^(-6));
+voltaggio = voltaggio * (10^(-6));
 
 % === LETTURA DEL FILE MECCANICO (.csv) ===
 opts = detectImportOptions(file_meccanico);
 opts.DataLines = [3, Inf]; 
+
+% Se il file continua a darti NaN, togli il "%" dalle due righe qui sotto:
+% opts.Delimiter = ';';
+% setvaropts(opts, 'DecimalSeparator', ',');
+
 dati1 = readmatrix(file_meccanico, opts);
 
 % Estrazione dei dati meccanici
@@ -27,13 +36,20 @@ t1 = str2double(strrep(string(t1), ',', '.'));
 spostamento = str2double(strrep(string(spostamento), ',', '.'));
 forza = str2double(strrep(string(forza), ',', '.'));
 
-% === PLOT DEI DATI ===
+% === TAGLIO DELLA FORZA: DALL'INIZIO A 84 SECONDI ===
+% (Se vuoi usare la forza intera fino a rottura, commenta o cancella queste 4 righe)
+[~, indice_84s] = min(abs(t1 - 84));
+t1 = t1(1:indice_84s);
+spostamento = spostamento(1:indice_84s);
+forza = forza(1:indice_84s);
+
+% === PLOT DEI DATI MECCANICI ===
 figure(1)
 plot(t1, spostamento, 'b');
 xlabel('Tempo (s)');
 ylabel('Spostamento');
 legend('Spostamento');
-title('Spostamento nel Tempo (File Meccanico)');
+title('Spostamento nel Tempo');
 grid on;
 
 figure(3)
@@ -41,14 +57,13 @@ plot(t1, forza, 'k');
 xlabel('Tempo (s)');
 ylabel('Forza');
 legend('Forza');
-title('Spostamento nel Tempo (File Meccanico)');
+title('Forza nel Tempo');
 grid on;
 
 % === FILTRAGGIO DEL VOLTAGGIO ===
 finestra = 800; 
 voltaggio_filtrato = smoothdata(voltaggio, 'sgolay', finestra);
 
-% === PLOT CON CONFRONTO E SELEZIONE GINPUT ===
 figure(2)
 plot(t2, voltaggio, 'Color', [0.7 0.7 0.7], 'DisplayName', 'Originale (Rumoroso)');
 hold on;
@@ -57,49 +72,26 @@ hold off;
 xlabel('Tempo (s)');
 ylabel('Voltaggio');
 legend('show');
-title('Clicca vicino al minimo di interesse per la sincronizzazione');
+title('Filtraggio del Voltaggio (Savitzky-Golay)');
 grid on;
 
-% === SELEZIONE MANUALE E RICERCA MINIMO LOCALE ===
-disp('Seleziona con un click sulla Figure 2 il punto vicino al minimo desiderato...');
-[x_click, ~] = ginput(1); % Prende le coordinate del click (interessa solo la x, cioè il tempo)
-
-% 1. Trovo l'indice del punto cliccato sul vettore dei tempi t2
-[~, indice_click] = min(abs(t2 - x_click));
-
-% 2. Cerco i minimi locali del voltaggio filtrato usando findpeaks sul segnale invertito
-[~, locs] = findpeaks(-voltaggio_filtrato);
-
-if ~isempty(locs)
-    % Trovo il minimo locale temporalmente più vicino al click dell'utente
-    [~, idx_min_vicino] = min(abs(locs - indice_click));
-    indice_min = locs(idx_min_vicino);
-else
-    % Se non trova minimi locali nei paraggi, usa direttamente il punto cliccato
-    warning('Nessun minimo locale rilevato automaticamente. Uso il punto esatto del click.');
-    indice_min = indice_click;
-end
-
-% Mostra sul grafico il punto effettivamente scelto per la sincronizzazione
-hold on;
-plot(t2(indice_min), voltaggio_filtrato(indice_min), 'bo', 'MarkerSize', 10, 'LineWidth', 2, 'DisplayName', 'Minimo Scelto');
-legend('show');
-hold off;
-
 % === SINCRONIZZAZIONE E TAGLIO DEL VOLTAGGIO ===
-% Quanti campioni (righe) ha la prova meccanica?
+% 1. Trovo l'indice del tempo t2 che è più vicino a 4 secondi (NUOVA MODIFICA)
+[~, indice_inizio_volt] = min(abs(t2 - 1.5));
+
+% 2. Quanti campioni ha la prova meccanica? (Così il voltaggio avrà la stessa lunghezza)
 N_campioni = length(t1);
 
-% Calcolo da quale indice del voltaggio devo iniziare a "tagliare"
-inizio_taglio = indice_min - N_campioni + 1;
+% 3. Calcolo l'indice finale in cui tagliare il voltaggio
+indice_fine_volt = indice_inizio_volt + N_campioni - 1;
 
 % Controllo di sicurezza
-if inizio_taglio < 1
-    error('Attenzione: la registrazione del voltaggio è partita troppo tardi per coprire tutta la prova meccanica!');
+if indice_fine_volt > length(voltaggio_filtrato)
+    error('Attenzione: il file del voltaggio è troppo corto per coprire i dati meccanici partendo dal secondo 4!');
 end
 
-% Estraggo solo la fetta di voltaggio che mi interessa
-voltaggio_tagliato = voltaggio_filtrato(inizio_taglio : indice_min);
+% 4. Estraggo la fetta di voltaggio sincronizzata
+voltaggio_tagliato = voltaggio_filtrato(indice_inizio_volt : indice_fine_volt);
 
 % === CREAZIONE DELL'OGGETTO UNICO ===
 Dati_Completi = table(t1, spostamento, forza, voltaggio_tagliato, ...
@@ -117,7 +109,7 @@ yyaxis right
 plot(Dati_Completi.Tempo, Dati_Completi.Voltaggio, '-r', 'LineWidth', 1.5, 'DisplayName', 'Voltaggio');
 ylabel('Voltaggio (V)');
 xlabel('Tempo della Prova (s)');
-title('Dati Sincronizzati e Tagliati sul Tempo Meccanico');
+title('Dati Sincronizzati (Voltaggio allineato partendo da t = 4s)');
 legend('Location', 'northwest');
 grid on;
 
@@ -127,7 +119,10 @@ R_fissa = 300000;
 V_out = Dati_Completi.Voltaggio;
 
 R_sensore = R_fissa .* (V_out ./ (V0 - V_out));
+
+% Calcolo della resistenza iniziale (R0) usando i primi 10 campioni sincronizzati
 R0 = mean(R_sensore(1:10));
+
 Delta_R = R_sensore - R0;
 Delta_R_su_R0 = Delta_R / R0; 
 
@@ -135,15 +130,33 @@ Delta_R_su_R0 = Delta_R / R0;
 Dati_Completi.Delta_R_su_R0 = Delta_R_su_R0;
 
 % === PLOT FINALE (Forza e Delta R) ===
-figure()
+figure(5)
 yyaxis left
-plot(Dati_Completi.Tempo, Dati_Completi.Forza, '-b', 'LineWidth', 1.5);
+plot(Dati_Completi.Tempo, Dati_Completi.Forza, '-g', 'LineWidth', 1.5);
 ylabel('Forza (N)');
+
 yyaxis right
-plot(Dati_Completi.Tempo, Dati_Completi.Delta_R_su_R0, '-r', 'LineWidth', 1.5);
+plot(Dati_Completi.Tempo, Dati_Completi.Delta_R_su_R0, '-k', 'LineWidth', 1.5);
 ylabel('\Delta R / R_0');
 xlabel('Tempo della Prova (s)');
-title('Confronto tra Forza Applicata e Risposta del Sensore (\DeltaR/R_0)');
+title('Confronto tra Forza Applicata e Risposta del Sensore');
+grid on;
+
+% === CALCOLO DELLO STRAIN % E DELTA R/R0 % ===
+L0 = 50; % <--- ATTENZIONE: SOSTITUISCI QUESTO VALORE CON QUELLO REALE DEL TUO PROVINO
+
+strain_percentuale = (Dati_Completi.Spostamento / L0) * 100;
+delta_r_percentuale = Dati_Completi.Delta_R_su_R0 * 100;
+
+Dati_Completi.Strain_Percentuale = strain_percentuale;
+Dati_Completi.DeltaR_Percentuale = delta_r_percentuale;
+
+% === PLOT: DELTA R/R0 % vs STRAIN % ===
+figure(6)
+plot(strain_percentuale, delta_r_percentuale, '-r', 'LineWidth', 2);
+xlabel('Strain (%)');
+ylabel('\Delta R / R_0 (%)');
+title('Risposta del sensore in funzione della deformazione');
 grid on;
 
 %% Salvo il risultato
