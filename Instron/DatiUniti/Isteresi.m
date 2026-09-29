@@ -13,320 +13,413 @@ function [Tabella_Isteresi_R, Dati_Filtro_Cicli, R0_usato] = Isteresi(...
     taglio_fine_perc, ...
     R0_imposto)
 
-% Normalizzazione etichetta tipo prova (es. "Sensore Lungo" -> "lungo")
+% =========================================================================
+% === 0. IMPOSTAZIONI INIZIALI ED ETICHETTE ===
+% =========================================================================
 tipo_pulito = lower(strtrim(string(tipo_prova)));
 tipo_pulito = regexprep(tipo_pulito, '^sensore[\s_]*', '');
-
-if tipo_pulito=='lungo'
+if strcmp(tipo_pulito, 'lungo')
     definizione_grafico = 'Long Sensor';
-elseif tipo_pulito=='corto'
+elseif strcmp(tipo_pulito, 'corto')
     definizione_grafico = 'Short Sensor';
-elseif tipo_pulito=='medio'
+elseif strcmp(tipo_pulito, 'medio')
     definizione_grafico = 'Medium Sensor';
+else
+    definizione_grafico = 'Sensor';
+end
+
+if isempty(frequenza_campionamento) || frequenza_campionamento <= 0
+    frequenza_campionamento = 100;
 end
 
 % =========================================================================
 % === 1. IMPORTAZIONE ED ELABORAZIONE PRELIMINARE ===
 % =========================================================================
-dati2 = readmatrix(file_elettrico); 
-voltaggio = dati2(:, 3) * (10^(-6));
-t2 = ((0:length(voltaggio)-1)') / frequenza_campionamento;
+% --- Instron (Dati Meccanici) ---
+opts_m = delimitedTextImportOptions("NumVariables", 3);
+opts_m.DataLines = [3, Inf];
+opts_m.Delimiter = ";";
+opts_m.VariableNames = ["Tempo", "Spostamento", "Forza"];
+opts_m.VariableTypes = ["double", "double", "double"];
+opts_m.ExtraColumnsRule = "ignore";
+opts_m.EmptyLineRule = "skip";
 
-opts = detectImportOptions(file_meccanico);
-opts.DataLines = [3, Inf];
-dati1 = readmatrix(file_meccanico, opts);
+opts_m = setvaropts(opts_m, ["Tempo", "Spostamento", "Forza"], "TrimNonNumeric", true);
+opts_m = setvaropts(opts_m, ["Tempo", "Spostamento", "Forza"], "DecimalSeparator", ",");
+opts_m = setvaropts(opts_m, ["Tempo", "Spostamento", "Forza"], "ThousandsSeparator", ".");
 
-t1 = str2double(strrep(string(dati1(:, 1)), ',', '.'));
-spostamento = str2double(strrep(string(dati1(:, 2)), ',', '.'));
-forza = str2double(strrep(string(dati1(:, 3)), ',', '.'));
+tbl_m = readtable(file_meccanico, opts_m);
+m_tempo_raw = tbl_m.Tempo;
+m_corsa_raw = tbl_m.Spostamento;
+m_carico_raw = tbl_m.Forza;
 
-voltaggio_filtrato = smoothdata(voltaggio, 'sgolay', finestre);
+% Bonifica da NaN e Inf
+idx_valid = isfinite(m_tempo_raw) & isfinite(m_corsa_raw) & isfinite(m_carico_raw);
+m_tempo_clean = m_tempo_raw(idx_valid);
+m_corsa_clean = m_corsa_raw(idx_valid);
+m_carico_clean = m_carico_raw(idx_valid);
+
+% Rimozione duplicati temporali e ordinamento rigorosamente crescente
+[m_tempo_unique, idx_unique] = unique(m_tempo_clean, 'sorted');
+m_corsa_unique  = m_corsa_clean(idx_unique);
+m_carico_unique = m_carico_clean(idx_unique);
+
+% Ricampionamento uniforme a frequenza_campionamento
+dt = 1 / frequenza_campionamento;
+tempo_f = (m_tempo_unique(1):dt:m_tempo_unique(end))';
+instron_corsa  = interp1(m_tempo_unique, m_corsa_unique,  tempo_f, 'linear', 'extrap');
+instron_carico = interp1(m_tempo_unique, m_carico_unique, tempo_f, 'linear', 'extrap');
+instron_tempo  = tempo_f;
+
+% --- Sensore DAQ (Dati Elettrici) ---
+opts_e = delimitedTextImportOptions("NumVariables", 3);
+opts_e.DataLines = [24, Inf];
+opts_e.Delimiter = "\t";
+opts_e.VariableNames = ["LabVIEWMeasurement", "VarName2", "Var3"];
+opts_e.SelectedVariableNames = ["LabVIEWMeasurement", "VarName2"];
+opts_e.VariableTypes = ["double", "double", "string"];
+opts_e.ExtraColumnsRule = "ignore";
+opts_e.EmptyLineRule = "skip";
+opts_e = setvaropts(opts_e, ["LabVIEWMeasurement", "VarName2"], "TrimNonNumeric", true);
+opts_e = setvaropts(opts_e, ["LabVIEWMeasurement", "VarName2"], "DecimalSeparator", ",");
+opts_e = setvaropts(opts_e, ["LabVIEWMeasurement", "VarName2"], "ThousandsSeparator", ".");
+
+data_e = readtable(file_elettrico, opts_e);
+data_arr = table2array(data_e);
+
+sensore_tensione_raw = data_arr(:, 2);
+
+% Filtraggio segnale di tensione
+if isempty(finestre) || finestre <= 0
+    span = 10;
+else
+    span = finestre;
+end
+sensore_tensione_filt = smooth(sensore_tensione_raw, span);
 
 % =========================================================================
-% === 2. SELEZIONE INTERATTIVA VOLTAGGIO (GINPUT) ===
+% === 2. SELEZIONE INTERATTIVA (GINPUT DINAMICO SUI MINIMI/MASSIMI) ===
 % =========================================================================
-t2_plot = t2 - t2(1);
-v_plot  = voltaggio_filtrato;
+% Finestra di ricerca dinamica: metà di un semiciclo (~25% del periodo totale)
+% A 12 cpm -> ~125 campioni; a 60 cpm -> ~25 campioni.
+durata_singolo_ciclo = 60 / cicli_al_minuto;
+campioni_per_ciclo   = frequenza_campionamento * durata_singolo_ciclo;
+w_dinamica           = max(25, round(campioni_per_ciclo * 0.25));
 
-figure('Name', 'Selezione Voltaggio', 'NumberTitle', 'off');
-plot(t2_plot, voltaggio, 'Color', [0.75 0.75 0.75], 'LineWidth', 1, 'DisplayName', 'Raw Voltage');
-hold on;
-plot(t2_plot, v_plot, 'r', 'LineWidth', 1.5, 'DisplayName', 'Filtered Voltage');
-xlabel('Time (s)'); ylabel('Voltage (V)');
-title(sprintf('VOLTAGE (%d cpm - %s): Clicca INIZIO e FINE (Max Locali a Riposo)', cicli_al_minuto, tipo_pulito));
-legend('Location', 'best');
+% --- 1. Corsa Instron: ricerca MINIMO locale a riposo ---
+fig_c = figure('Name', 'Selezione Corsa Instron', 'NumberTitle', 'off');
+plot(instron_corsa, 'b', 'LineWidth', 1.2); hold on;
+title(sprintf('INSTRON CORSA (%d cpm): Clicca INIZIO e FINE sui MINIMI a riposo', cicli_al_minuto), ...
+      'FontName', 'Times New Roman');
+xlabel('Campioni'); ylabel('Corsa [mm]');
 grid on;
-
-disp('--- 1. VOLTAGGIO ---');
-disp('Clicca DUE VOLTE sulla figura del Voltaggio: Inizio e Fine...');
+disp('INSTRON CORSA: Clicca su due punti in corrispondenza del PRIMO e dell''ULTIMO MINIMO (riposo).');
 drawnow;
-[x_click_V, ~] = ginput(2); 
-x_click_V = sort(x_click_V); 
+[x_instron, ~] = ginput(2);
 
-punti_intorno = round(frequenza_campionamento * (30 / cicli_al_minuto) * 0.5); 
+x_instron = sort(x_instron);
+instron_start_raw = round(x_instron(1));
+instron_end_raw   = round(x_instron(2));
 
-[~, idx_V1] = min(abs(t2_plot - x_click_V(1)));
-idx_start_W_V1 = max(1, idx_V1 - punti_intorno);
-idx_end_W_V1   = min(length(voltaggio_filtrato), idx_V1 + punti_intorno);
-[~, max_loc_V1] = max(voltaggio_filtrato(idx_start_W_V1 : idx_end_W_V1));
-indice_inizio_V = idx_start_W_V1 + max_loc_V1 - 1;
+% Raffinamento locale con finestra adattativa
+idx_s_min = max(1, instron_start_raw - w_dinamica);
+idx_s_max = min(length(instron_corsa), instron_start_raw + w_dinamica);
+[~, c_s] = min(instron_corsa(idx_s_min:idx_s_max));
+instron_start = idx_s_min + c_s - 1;
 
-[~, idx_V2] = min(abs(t2_plot - x_click_V(2)));
-idx_start_W_V2 = max(1, idx_V2 - punti_intorno);
-idx_end_W_V2   = min(length(voltaggio_filtrato), idx_V2 + punti_intorno);
-[~, max_loc_V2] = max(voltaggio_filtrato(idx_start_W_V2 : idx_end_W_V2));
-indice_fine_V = idx_start_W_V2 + max_loc_V2 - 1;
+idx_e_min = max(1, instron_end_raw - w_dinamica);
+idx_e_max = min(length(instron_corsa), instron_end_raw + w_dinamica);
+[~, c_e] = min(instron_corsa(idx_e_min:idx_e_max));
+instron_end = idx_e_min + c_e - 1;
 
-hold on;
-plot(t2_plot(indice_inizio_V), v_plot(indice_inizio_V), 'ko', 'MarkerFaceColor', 'g', 'HandleVisibility', 'off');
-plot(t2_plot(indice_fine_V), v_plot(indice_fine_V), 'ko', 'MarkerFaceColor', 'r', 'HandleVisibility', 'off');
-hold off;
+% Feedback visivo dell'aggancio effettivo
+plot(instron_start, instron_corsa(instron_start), 'go', 'MarkerFaceColor', 'g', 'MarkerSize', 8);
+plot(instron_end,   instron_corsa(instron_end),   'ro', 'MarkerFaceColor', 'r', 'MarkerSize', 8);
+drawnow; pause(0.5);
+close(fig_c);
 
-% =========================================================================
-% === 3. SELEZIONE INTERATTIVA SPOSTAMENTO (GINPUT) ===
-% =========================================================================
-t1_plot = t1 - t1(1);
-disp_plot = spostamento - spostamento(1);
-
-figure('Name', 'Selezione Spostamento', 'NumberTitle', 'off');
-plot(t1_plot, disp_plot, 'b', 'LineWidth', 1.5);
-xlabel('Time (s)'); ylabel('Displacement (mm)');
-title(sprintf('DISPLACEMENT (%d cpm - %s): Clicca INIZIO e FINE (Min Locali)', cicli_al_minuto, tipo_pulito));
+% --- 2. Tensione DAQ: ricerca MASSIMO locale a riposo ---
+fig_s = figure('Name', 'Selezione Tensione Sensore', 'NumberTitle', 'off');
+plot(sensore_tensione_filt, 'm', 'LineWidth', 1.2); hold on;
+title(sprintf('DAQ SENSORE (%d cpm): Clicca INIZIO e FINE sui MASSIMI di tensione (riposo)', cicli_al_minuto), ...
+      'FontName', 'Times New Roman');
+xlabel('Campioni'); ylabel('Tensione [V]');
 grid on;
-
-disp('--- 2. SPOSTAMENTO MECCANICO ---');
-disp('Clicca DUE VOLTE sulla figura dello Spostamento: Inizio e Fine...');
+disp('DAQ SENSORE: Clicca su due punti in corrispondenza del PRIMO e dell''ULTIMO MASSIMO (riposo).');
 drawnow;
-[x_click_F, ~] = ginput(2); 
-x_click_F = sort(x_click_F); 
+[x_sensore, ~] = ginput(2);
 
-[~, idx_F1] = min(abs(t1_plot - x_click_F(1)));
-idx_start_W_F1 = max(1, idx_F1 - punti_intorno);
-idx_end_W_F1   = min(length(spostamento), idx_F1 + punti_intorno);
-[~, min_loc_F1] = min(spostamento(idx_start_W_F1 : idx_end_W_F1));
-indice_inizio_F = idx_start_W_F1 + min_loc_F1 - 1;
+x_sensore = sort(x_sensore);
+sensore_start_raw = round(x_sensore(1));
+sensore_end_raw   = round(x_sensore(2));
 
-[~, idx_F2] = min(abs(t1_plot - x_click_F(2)));
-idx_start_W_F2 = max(1, idx_F2 - punti_intorno);
-idx_end_W_F2   = min(length(spostamento), idx_F2 + punti_intorno);
-[~, min_loc_F2] = min(spostamento(idx_start_W_F2 : idx_end_W_F2));
-indice_fine_F = idx_start_W_F2 + min_loc_F2 - 1;
+% Raffinamento locale con finestra adattativa
+idx_vs_min = max(1, sensore_start_raw - w_dinamica);
+idx_vs_max = min(length(sensore_tensione_filt), sensore_start_raw + w_dinamica);
+[~, c_vs] = max(sensore_tensione_filt(idx_vs_min:idx_vs_max));
+sensore_start = idx_vs_min + c_vs - 1;
 
-hold on;
-plot(t1_plot(indice_inizio_F), disp_plot(indice_inizio_F), 'ko', 'MarkerFaceColor', 'g');
-plot(t1_plot(indice_fine_F), disp_plot(indice_fine_F), 'ko', 'MarkerFaceColor', 'r');
-hold off;
+idx_ve_min = max(1, sensore_end_raw - w_dinamica);
+idx_ve_max = min(length(sensore_tensione_filt), sensore_end_raw + w_dinamica);
+[~, c_ve] = max(sensore_tensione_filt(idx_ve_min:idx_ve_max));
+sensore_end = idx_ve_min + c_ve - 1;
+
+% Feedback visivo dell'aggancio effettivo
+plot(sensore_start, sensore_tensione_filt(sensore_start), 'go', 'MarkerFaceColor', 'g', 'MarkerSize', 8);
+plot(sensore_end,   sensore_tensione_filt(sensore_end),   'ro', 'MarkerFaceColor', 'r', 'MarkerSize', 8);
+drawnow; pause(0.5);
+close(fig_s);
 
 % =========================================================================
-% === 4. SINCRONIZZAZIONE E CALCOLO RESISTENZA ===
+% === 3. FINESTRATURA, SINCRONIZZAZIONE E PARTITORE ===
 % =========================================================================
-voltaggio_tagliato   = voltaggio_filtrato(indice_inizio_V : indice_fine_V);
-t1_tagliato          = t1(indice_inizio_F : indice_fine_F);
-forza_tagliata       = forza(indice_inizio_F : indice_fine_F);
-spostamento_tagliato = spostamento(indice_inizio_F : indice_fine_F);
+Tempo_f  = instron_tempo(instron_start:instron_end) - instron_tempo(instron_start);
+Corsa_f  = instron_corsa(instron_start:instron_end);
+Carico_f = instron_carico(instron_start:instron_end);
+sensore_V_fin = sensore_tensione_filt(sensore_start:sensore_end);
 
-L_min = min(length(voltaggio_tagliato), length(forza_tagliata));
-voltaggio_tagliato   = voltaggio_tagliato(1:L_min);
-t1_tagliato          = t1_tagliato(1:L_min);
-forza_tagliata       = forza_tagliata(1:L_min);
-spostamento_tagliato = spostamento_tagliato(1:L_min);
+% Allineamento lunghezze
+L_min = min(length(Corsa_f), length(sensore_V_fin));
+Tempo_f       = Tempo_f(1:L_min);
+Corsa_f       = Corsa_f(1:L_min);
+Carico_f      = Carico_f(1:L_min);
+sensore_V_fin = sensore_V_fin(1:L_min);
 
-Dati_Completi = table(t1_tagliato, spostamento_tagliato, forza_tagliata, voltaggio_tagliato, ...
-    'VariableNames', {'Tempo', 'Spostamento', 'Forza', 'Voltaggio'});
+% Formula partitore lato terra: R_sensore in Ohm (Rfissa = 300 kOhm, Vcc = 5V)
+R_fissa = 300e3;
+sensore_R_Ohm = (sensore_V_fin ./ (5 - sensore_V_fin)) * R_fissa;
 
-V0 = 5; 
-R_fissa = 300000; 
-V_out = Dati_Completi.Voltaggio; 
-Dati_Completi.R_sensore = R_fissa .* (V_out ./ (V0 - V_out));
+Dati_Completi = table(Tempo_f, Corsa_f, Carico_f, sensore_V_fin, sensore_R_Ohm, ...
+    'VariableNames', {'Tempo', 'Spostamento', 'Forza', 'Voltaggio', 'R_sensore'});
 
-durata_singolo_ciclo = 60 / cicli_al_minuto; 
-tempo_start_valido   = Dati_Completi.Tempo(1) + (cicli_da_scartare_inizio * durata_singolo_ciclo);
-tempo_end_valido     = Dati_Completi.Tempo(end) - (cicli_da_scartare_fine * durata_singolo_ciclo);
+% Scarto cicli transitori (inizio e fine)
+tempo_start_valido = Dati_Completi.Tempo(1) + (cicli_da_scartare_inizio * durata_singolo_ciclo);
+tempo_end_valido   = Dati_Completi.Tempo(end) - (cicli_da_scartare_fine * durata_singolo_ciclo);
 
-Dati_Filtro_Cicli    = Dati_Completi(Dati_Completi.Tempo >= tempo_start_valido & ...
-                                     Dati_Completi.Tempo <= tempo_end_valido, :);
+Dati_Filtro_Cicli = Dati_Completi(Dati_Completi.Tempo >= tempo_start_valido & ...
+                                 Dati_Completi.Tempo <= tempo_end_valido, :);
 
 if ~isempty(file_output)
     writetable(Dati_Filtro_Cicli, file_output);
-    fprintf('Dati salvati con successo in: %s\n', file_output);
+    fprintf('Dati filtrati salvati con successo in: %s\n', file_output);
 end
 
 % =========================================================================
-% === 5. IDENTIFICAZIONE PICCHI / VALLI & VERIFICA COERENZA (YYAXIS) ===
+% === 4. IDENTIFICAZIONE DEI PICCHI E ALLINEAMENTO CICLI (ROBUSTA) ===
 % =========================================================================
-X_raw = Dati_Filtro_Cicli.Spostamento; 
-V_raw = Dati_Filtro_Cicli.Voltaggio; 
-R_raw = Dati_Filtro_Cicli.R_sensore; 
-T_raw = Dati_Filtro_Cicli.Tempo - Dati_Filtro_Cicli.Tempo(1);
+Corsa_sig = Dati_Filtro_Cicli.Spostamento;
+V_sig     = Dati_Filtro_Cicli.Voltaggio;
+R_sig     = Dati_Filtro_Cicli.R_sensore;
+T_sig     = Dati_Filtro_Cicli.Tempo - Dati_Filtro_Cicli.Tempo(1);
 
-n_campionamento_ciclo = frequenza_campionamento * (60 / cicli_al_minuto);
-distanza_minima       = round(n_campionamento_ciclo * 0.50);
+n_pts_ciclo     = round(frequenza_campionamento * durata_singolo_ciclo);
+distanza_minima = round(n_pts_ciclo * 0.55);
+prominenza_X    = (max(Corsa_sig) - min(Corsa_sig)) * 0.25;
+prominenza_V    = (max(V_sig) - min(V_sig)) * 0.25;
 
-% --- A. Picchi Meccanici (Spostamento) ---
-X_smooth        = smoothdata(X_raw, 'movmean', round(frequenza_campionamento * 0.15));
-prominenza_min_X = (max(X_smooth) - min(X_smooth)) * 0.25;
-[~, locs_min_X] = findpeaks(-X_smooth, 'MinPeakDistance', distanza_minima, 'MinPeakProminence', prominenza_min_X);
-[~, locs_max_X] = findpeaks(X_smooth,  'MinPeakDistance', distanza_minima, 'MinPeakProminence', prominenza_min_X);
+% Ricerca picchi meccanici
+[~, Max_Idx_raw] = findpeaks(Corsa_sig,  'MinPeakDistance', distanza_minima, 'MinPeakProminence', prominenza_X);
+[~, Min_Idx_raw] = findpeaks(-Corsa_sig, 'MinPeakDistance', distanza_minima, 'MinPeakProminence', prominenza_X);
 
-% --- B. Picchi Voltaggio/Resistenza ---
-V_smooth        = smoothdata(V_raw, 'movmean', round(frequenza_campionamento * 0.15));
-prominenza_min_V = (max(V_smooth) - min(V_smooth)) * 0.25;
-[~, locs_max_V] = findpeaks(V_smooth,  'MinPeakDistance', distanza_minima, 'MinPeakProminence', prominenza_min_V);
-[~, locs_min_V] = findpeaks(-V_smooth, 'MinPeakDistance', distanza_minima, 'MinPeakProminence', prominenza_min_V);
+% Ricerca picchi elettrici (Voltaggio)
+[~, Max_V_raw]   = findpeaks(V_sig,  'MinPeakDistance', distanza_minima, 'MinPeakProminence', prominenza_V);
+[~, Min_V_raw]   = findpeaks(-V_sig, 'MinPeakDistance', distanza_minima, 'MinPeakProminence', prominenza_V);
 
-figure('Name', 'Verifica Coerenza: Spostamento vs Voltaggio', 'NumberTitle', 'off');
+% Triplette rigorose: Min_Start -> Max_Peak -> Min_End
+valid_cycles = [];
+for k = 1:length(Min_Idx_raw)-1
+    m_start = Min_Idx_raw(k);
+    m_end   = Min_Idx_raw(k+1);
+    
+    p_max = Max_Idx_raw(Max_Idx_raw > m_start & Max_Idx_raw < m_end);
+    if length(p_max) == 1
+        valid_cycles = [valid_cycles; m_start, p_max, m_end]; %#ok<AGROW>
+    end
+end
+
+if isempty(valid_cycles)
+    error('Errore di sincronizzazione a %d cpm: impossibile accoppiare i picchi di corsa.', cicli_al_minuto);
+end
+
+MinPeaksCorsa_Idx  = valid_cycles(:, 1);
+MaxPeaksCorsa_Idx  = valid_cycles(:, 2);
+MinPeaksCorsa_Next = valid_cycles(:, 3);
+N_cicli = size(valid_cycles, 1);
+
+% =========================================================================
+% === 4-BIS. PLOT DI VERIFICA SINCRONIZZAZIONE (DEFORMAZIONE VS VOLTAGGIO) ===
+% =========================================================================
+strain_totale = (Corsa_sig / L0) * 100;
+
+fig_check = figure('Name', 'Verifica Sincronizzazione: Deformazione vs Voltaggio', ...
+                   'NumberTitle', 'off', 'Color', 'w');
+
+% --- Asse Sinistro: Deformazione Meccanica ---
 yyaxis left
-plot(T_raw, X_raw, 'b-', 'LineWidth', 1.2); hold on;
-plot(T_raw(locs_max_X), X_raw(locs_max_X), 'r^', 'MarkerFaceColor', 'r', 'MarkerSize', 7);
-plot(T_raw(locs_min_X), X_raw(locs_min_X), 'bv', 'MarkerFaceColor', 'b', 'MarkerSize', 7);
-ylabel('Spostamento (mm)', 'FontWeight', 'bold');
+h_strain = plot(T_sig, strain_totale, 'Color', [0 0.4470 0.7410], 'LineWidth', 1.5, ...
+                'DisplayName', '\epsilon [%]');
+hold on;
+h_strain_min = plot(T_sig(MinPeaksCorsa_Idx), strain_totale(MinPeaksCorsa_Idx), 'bs', ...
+                    'MarkerFaceColor', [0 0.4470 0.7410], 'MarkerSize', 6, ...
+                    'DisplayName', 'Min \epsilon (Inizio Ciclo)');
+h_strain_max = plot(T_sig(MaxPeaksCorsa_Idx), strain_totale(MaxPeaksCorsa_Idx), 'r^', ...
+                    'MarkerFaceColor', 'r', 'MarkerSize', 6, ...
+                    'DisplayName', 'Max \epsilon (Trazione)');
+ylabel('Deformazione \epsilon [%]', 'FontName', 'Times New Roman', 'FontSize', 14, 'FontWeight', 'bold');
 ax = gca;
-ax.YColor = [0 0.2 0.8];
+ax.YColor = [0 0.4470 0.7410];
 
+% --- Asse Destro: Voltaggio Elettrico ---
 yyaxis right
-plot(T_raw, V_raw, 'm-', 'LineWidth', 1.2);
-plot(T_raw(locs_max_V), V_raw(locs_max_V), 'ko', 'MarkerFaceColor', 'g', 'MarkerSize', 6);
-plot(T_raw(locs_min_V), V_raw(locs_min_V), 'rv', 'MarkerFaceColor', 'm', 'MarkerSize', 6);
-ylabel('Voltaggio (V)', 'FontWeight', 'bold');
-ax.YColor = [0.8 0 0.5];
+h_volt = plot(T_sig, V_sig, 'Color', [0.8500 0.3250 0.0980], 'LineWidth', 1.5, ...
+              'DisplayName', 'Voltaggio [V]');
+h_volt_max = plot(T_sig(Max_V_raw), V_sig(Max_V_raw), 'go', ...
+                  'MarkerFaceColor', [0.4660 0.6740 0.1880], 'MarkerSize', 6, ...
+                  'DisplayName', 'Max V (Riposo)');
+h_volt_min = plot(T_sig(Min_V_raw), V_sig(Min_V_raw), 'mv', ...
+                  'MarkerFaceColor', 'm', 'MarkerSize', 6, ...
+                  'DisplayName', 'Min V (Max Trazione)');
+ylabel('Tensione [V]', 'FontName', 'Times New Roman', 'FontSize', 14, 'FontWeight', 'bold');
+ax.YColor = [0.8500 0.3250 0.0980];
 
-xlabel('Tempo Relativo (s)', 'FontWeight', 'bold');
-title(sprintf('Verifica Allineamento: Spostamento vs Voltaggio (%d cpm - %s)', cicli_al_minuto, tipo_pulito));
+xlabel('Tempo [s]', 'FontName', 'Times New Roman', 'FontSize', 14, 'FontWeight', 'bold');
+title(sprintf('Verifica Allineamento Temporale e Picchi (%d cpm - %s)', cicli_al_minuto, tipo_pulito), ...
+      'FontName', 'Times New Roman', 'FontSize', 15);
 grid on;
-legend({'Spostamento', 'Max Spostamento', 'Min Spostamento', ...
-        'Voltaggio', 'Max Voltaggio (Riposo)', 'Min Voltaggio (Max Trazione)'}, ...
-        'Location', 'best', 'NumColumns', 2);
+legend([h_strain, h_strain_min, h_strain_max, h_volt, h_volt_max, h_volt_min], ...
+       'Location', 'best', 'NumColumns', 2, 'FontName', 'Times New Roman', 'FontSize', 10);
+set(gca, 'FontName', 'Times New Roman', 'FontSize', 12);
+xlim([0, max(T_sig)]);
 
 % =========================================================================
-% === 6 & 7. ALLINEAMENTO MAX DEFORMAZIONE -> MIN VOLTAGGIO / R & ISTERESI ===
+% === 5. CALCOLO DELL'ISTERESI E GENERAZIONE CURVE ===
 % =========================================================================
-N_cicli = min(length(locs_min_X) - 1, length(locs_max_V) - 1);
-
 if ~isempty(R0_imposto) && R0_imposto > 0
     R0_usato = R0_imposto;
 else
-    R0_usato = mean(R_raw(1:min(20, length(R_raw))));
+    R0_usato = mean(R_sig(1:min(20, length(R_sig))));
 end
 
-Delta_R_max       = zeros(N_cicli, 1);
-R_base_ciclo      = zeros(N_cicli, 1);
+Delta_R_max_Ohm   = zeros(N_cicli, 1);
+Delta_R_max_kOhm  = zeros(N_cicli, 1);
+R0_ciclo_vett     = zeros(N_cicli, 1);
 H_max_R0_Perc     = zeros(N_cicli, 1);
 Strain_at_Hmax    = zeros(N_cicli, 1);
 Drift_Residuo_Ohm = zeros(N_cicli, 1);
-R0_vett           = repmat(R0_usato, N_cicli, 1);
+R0_globale_vett   = repmat(R0_usato, N_cicli, 1);
 
-fig_h = figure('Name', 'Curva Isteresi (Max Deformazione -> Min Voltaggio/Resistenza)', 'NumberTitle', 'off', 'Color', 'w');
+fig_h = figure('Name', 'Cicli di Isteresi', 'NumberTitle', 'off', 'Color', 'w');
 hold on; grid on;
 h_salita = []; h_discesa = [];
 
 for i = 1:N_cicli
-    % --- Estremi Meccanici ---
-    idx_m_start = locs_min_X(i);
-    idx_m_end   = locs_min_X(i+1);
-    p_m = locs_max_X(locs_max_X > idx_m_start & locs_max_X < idx_m_end);
-    if isempty(p_m), continue; end
-    idx_m_peak  = p_m(1);
+    idx_min_1 = MinPeaksCorsa_Idx(i);
+    idx_max   = MaxPeaksCorsa_Idx(i);
+    idx_min_2 = MinPeaksCorsa_Next(i);
     
-    % --- Estremi Elettrici ---
-    idx_e_start = locs_max_V(i);
-    idx_e_end   = locs_max_V(i+1);
-    p_e = locs_min_V(locs_min_V > idx_e_start & locs_min_V < idx_e_end);
-    if isempty(p_e), continue; end
-    idx_e_min   = p_e(1);
+    salita_instron  = Corsa_sig(idx_min_1 : idx_max);
+    discesa_instron = Corsa_sig(idx_max : idx_min_2);
     
-    x_zero = X_raw(idx_m_start);
-    r_zero = R_raw(idx_e_start);
-    R_base_ciclo(i)      = r_zero;
-    Drift_Residuo_Ohm(i) = R_raw(idx_e_end) - r_zero;
+    salita_sensore  = R_sig(idx_min_1 : idx_max);
+    discesa_sensore = R_sig(idx_max : idx_min_2);
     
-    % Salita
-    s_load_raw = ((X_raw(idx_m_start : idx_m_peak) - x_zero) / L0) * 100;
-    r_load_raw = R_raw(idx_e_start : idx_e_min) - r_zero;
+    r_zero = salita_sensore(1);
+    R0_ciclo_vett(i)     = r_zero;
+    Drift_Residuo_Ohm(i) = discesa_sensore(end) - r_zero;
     
-    % Discesa
-    s_unload_raw = ((X_raw(idx_m_peak : idx_m_end) - x_zero) / L0) * 100;
-    r_unload_raw = R_raw(idx_e_min : idx_e_end) - r_zero;
+    % Interpolazione sulla lunghezza della fase di salita
+    len_s = length(salita_instron);
+    discesa_instron_interp = interp1(1:length(discesa_instron), discesa_instron, 1:len_s, 'linear', 'extrap')';
+    salita_sensore_interp  = interp1(1:length(salita_sensore),  salita_sensore,  1:len_s, 'linear', 'extrap')';
+    discesa_sensore_interp = interp1(1:length(discesa_sensore), discesa_sensore, 1:len_s, 'linear', 'extrap')';
     
-    N_pts_load   = length(s_load_raw);
-    N_pts_unload = length(s_unload_raw);
+    % Calcolo Strain (%) e Delta R rispetto al riposo [kOhm]
+    strain_salita  = (salita_instron / L0) * 100;
+    strain_discesa = (flip(discesa_instron_interp) / L0) * 100;
     
-    r_load_aligned   = interp1(linspace(0, 1, length(r_load_raw)),   r_load_raw,   linspace(0, 1, N_pts_load)',   'linear');
-    r_unload_aligned = interp1(linspace(0, 1, length(r_unload_raw)), r_unload_raw, linspace(0, 1, N_pts_unload)', 'linear');
+    deltaR_salita_kOhm  = (salita_sensore_interp - r_zero) * 1e-3;
+    deltaR_discesa_kOhm = (flip(discesa_sensore_interp) - r_zero) * 1e-3;
     
-    h1 = plot(s_load_raw,   r_load_aligned,   'r-', 'LineWidth', 1.2);
+    h1 = plot(strain_salita,  deltaR_salita_kOhm,  'Color', [0.9, 0, 0], 'LineWidth', 1.2);
     if isempty(h_salita), h_salita = h1; end
     
-    h2 = plot(s_unload_raw, r_unload_aligned, 'b-', 'LineWidth', 1.2);
+    h2 = plot(strain_discesa, deltaR_discesa_kOhm, 'Color', [0, 0.7, 0], 'LineWidth', 1.2);
     if isempty(h_discesa), h_discesa = h2; end
     
-    % H_max
-    [s_l_u, idx_lu]   = unique(s_load_raw);
-    r_l_u             = r_load_aligned(idx_lu);
-    [s_un_u, idx_unu] = unique(s_unload_raw);
-    r_un_u            = r_unload_aligned(idx_unu);
-    
-    s_min = max(min(s_l_u), min(s_un_u));
-    s_max = min(max(s_l_u), max(s_un_u));
+    % Calcolo H_max su intervallo di strain normalizzato
+    s_min = max(min(strain_salita), min(strain_discesa));
+    s_max = min(max(strain_salita), max(strain_discesa));
     delta_s = s_max - s_min;
     
-    s_lim_inf = s_min + (taglio_inizio_perc * delta_s);
-    s_lim_sup = s_max - (taglio_fine_perc   * delta_s);
+    s_inf = s_min + (taglio_inizio_perc * delta_s);
+    s_sup = s_max - (taglio_fine_perc   * delta_s);
     
-    if s_lim_sup > s_lim_inf
-        s_grid = linspace(s_lim_inf, s_lim_sup, 250);
-        r_load_interp   = interp1(s_l_u,  r_l_u,  s_grid, 'linear');
-        r_unload_interp = interp1(s_un_u, r_un_u, s_grid, 'linear');
+    if s_sup > s_inf
+        s_grid = linspace(s_inf, s_sup, 250);
+        r_sal_grid = interp1(strain_salita, salita_sensore_interp, s_grid, 'linear');
+        r_dis_grid = interp1(strain_discesa, flip(discesa_sensore_interp), s_grid, 'linear');
         
-        diff_isteresi = abs(r_load_interp - r_unload_interp);
-        [Delta_R_max(i), idx_h] = max(diff_isteresi);
-        Strain_at_Hmax(i)       = s_grid(idx_h);
-        H_max_R0_Perc(i)        = (Delta_R_max(i) / R0_usato) * 100;
+        diff_isteresi = abs(r_sal_grid - r_dis_grid);
+        [max_diff, idx_h_max] = max(diff_isteresi);
+        
+        Delta_R_max_Ohm(i)  = max_diff;
+        Delta_R_max_kOhm(i) = max_diff * 1e-3;
+        Strain_at_Hmax(i)   = s_grid(idx_h_max);
+        H_max_R0_Perc(i)    = (max_diff / r_zero) * 100;
     end
 end
 
-xlabel('Strain (%)', 'FontWeight', 'bold'); 
-ylabel('\DeltaR (\Omega)', 'FontWeight', 'bold');
-title(sprintf('Hysteresis Curve (%d cpm - %s )', cicli_al_minuto, definizione_grafico));
+xlabel('\epsilon [%]', 'FontName', 'Times New Roman', 'FontSize', 15);
+ylabel('\DeltaR [k\Omega]', 'FontName', 'Times New Roman', 'FontSize', 15);
+title(sprintf('Cicli di Isteresi (%d cpm - %s)', cicli_al_minuto, definizione_grafico), ...
+      'FontName', 'Times New Roman', 'FontSize', 16);
 if ~isempty(h_salita) && ~isempty(h_discesa)
-    legend([h_salita, h_discesa], {'Loading', 'Unloading'}, ...
-           'Location', 'northeast', 'FontSize', 10);
+    legend([h_salita, h_discesa], {'Carico (Loading)', 'Scarico (Unloading)'}, ...
+           'FontName', 'Times New Roman', 'Location', 'best');
 end
+set(gca, 'FontName', 'Times New Roman', 'FontSize', 14);
 hold off;
 
-Tabella_Isteresi_R = table((1:N_cicli)', R0_vett, R_base_ciclo, Delta_R_max, H_max_R0_Perc, Drift_Residuo_Ohm, Strain_at_Hmax, ...
-    'VariableNames', {'Ciclo', 'R0_Globale', 'R_base_ciclo', 'Delta_R_max', 'H_max_R0_Perc', 'Drift_Residuo_Ohm', 'Strain_at_Hmax'});
-disp(Tabella_Isteresi_R);
+% Costruzione Tabella di Uscita
+Tabella_Isteresi_R = table((1:N_cicli)', R0_globale_vett, R0_ciclo_vett, ...
+    Delta_R_max_Ohm, Delta_R_max_kOhm, H_max_R0_Perc, Drift_Residuo_Ohm, Strain_at_Hmax, ...
+    'VariableNames', {'Ciclo', 'R0_Globale', 'R0_Ciclo', ...
+                      'Delta_R_max', 'Delta_R_max_kOhm', 'H_max_R0_Perc', 'Drift_Residuo_Ohm', 'Strain_at_Hmax'});
 
 % =========================================================================
-% === 8. PLOT ANDAMENTO ISTERESI CICLO PER CICLO ===
+% === 6. PLOT ANDAMENTO E SALVATAGGIO DEI GRAFICI ===
 % =========================================================================
 fig_trend = figure('Name', 'Andamento Isteresi per Ciclo', 'NumberTitle', 'off', 'Color', 'w');
 subplot(2, 1, 1);
-plot(1:N_cicli, H_max_R0_Perc, '-o', 'LineWidth', 1.5, 'Color', 'b', 'MarkerFaceColor', 'b');
-xlabel('Numero Ciclo'); ylabel('H_{max} (% R_0)');
-title(sprintf('Errore Massimo di Isteresi su R_0 Globale (%.1f \\Omega) - %d cpm (%s)', R0_usato, cicli_al_minuto, tipo_pulito));
+plot(1:N_cicli, H_max_R0_Perc, '-o', 'LineWidth', 1.5, 'Color', [0 0.4470 0.7410], 'MarkerFaceColor', [0 0.4470 0.7410]);
+xlabel('Numero Ciclo', 'FontName', 'Times New Roman');
+ylabel('H_{max} [% R_{0,ciclo}]', 'FontName', 'Times New Roman');
+title(sprintf('Errore di Isteresi su R_{0,ciclo} - %d cpm (%s)', cicli_al_minuto, tipo_pulito), 'FontName', 'Times New Roman');
 grid on;
+set(gca, 'FontName', 'Times New Roman', 'FontSize', 12);
 
 subplot(2, 1, 2);
-plot(1:N_cicli, Strain_at_Hmax, '-s', 'LineWidth', 1.5, 'Color', 'm', 'MarkerFaceColor', 'm');
-xlabel('Numero Ciclo'); ylabel('Strain @ H_{max} (%)');
-title('Posizione di Massima Apertura dell''Isteresi');
+plot(1:N_cicli, Strain_at_Hmax, '-s', 'LineWidth', 1.5, 'Color', [0.6350 0.0780 0.1840], 'MarkerFaceColor', [0.6350 0.0780 0.1840]);
+xlabel('Numero Ciclo', 'FontName', 'Times New Roman');
+ylabel('Strain @ H_{max} [%]', 'FontName', 'Times New Roman');
+title('Posizione di Massima Apertura dell''Isteresi', 'FontName', 'Times New Roman');
 grid on;
+set(gca, 'FontName', 'Times New Roman', 'FontSize', 12);
 
-% =========================================================================
-% === 9. SALVATAGGIO AUTOMATICO DEI GRAFICI ===
-% =========================================================================
-% Cartella di destinazione dinamica: ./Grafici/isteresi_<tipo_prova>/
 dir_grafici = fullfile('.', 'Grafici', sprintf('Isteresi_%s', tipo_pulito));
 if ~exist(dir_grafici, 'dir')
     mkdir(dir_grafici);
 end
 
-% Salvataggio Curva di Isteresi
+% Salvataggio figura diagnostica sincronizzazione
+nome_fig_check = sprintf('Alignment_Check_%s_%dcpm', tipo_pulito, cicli_al_minuto);
+exportgraphics(fig_check, fullfile(dir_grafici, [nome_fig_check, '.pdf']), 'ContentType', 'vector');
+
+% Salvataggio curva di isteresi
 nome_fig_h = sprintf('Hysteresis_Curve_%s_%dcpm', tipo_pulito, cicli_al_minuto);
 exportgraphics(fig_h, fullfile(dir_grafici, [nome_fig_h, '.pdf']), 'ContentType', 'vector');
 
-% Salvataggio Andamento per Ciclo
+% Salvataggio andamento metriche per ciclo
 nome_fig_trend = sprintf('Hysteresis_Trend_%s_%dcpm', tipo_pulito, cicli_al_minuto);
 exportgraphics(fig_trend, fullfile(dir_grafici, [nome_fig_trend, '.pdf']), 'ContentType', 'vector');
 
