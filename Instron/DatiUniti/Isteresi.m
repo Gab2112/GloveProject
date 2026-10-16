@@ -343,7 +343,7 @@ for i = 1:N_cicli
     h1 = plot(strain_salita,  deltaR_salita_kOhm,  'Color', [0.9, 0, 0], 'LineWidth', 1.2);
     if isempty(h_salita), h_salita = h1; end
     
-    h2 = plot(strain_discesa, deltaR_discesa_kOhm, 'Color', [0, 0.7, 0], 'LineWidth', 1.2);
+    h2 = plot(strain_discesa, deltaR_discesa_kOhm, 'Color', [0, 0, 0.9], 'LineWidth', 1.2);
     if isempty(h_discesa), h_discesa = h2; end
     
     % Calcolo H_max su intervallo di strain normalizzato
@@ -369,13 +369,13 @@ for i = 1:N_cicli
     end
 end
 
-xlabel('\epsilon [%]', 'FontName', 'Times New Roman', 'FontSize', 15);
+xlabel('Strain \epsilon [%]', 'FontName', 'Times New Roman', 'FontSize', 15);
 ylabel('\DeltaR [k\Omega]', 'FontName', 'Times New Roman', 'FontSize', 15);
-title(sprintf('Cicli di Isteresi (%d cpm - %s)', cicli_al_minuto, definizione_grafico), ...
+title(sprintf('Hysteresis Cicles (%d cpm - %s)', cicli_al_minuto, definizione_grafico), ...
       'FontName', 'Times New Roman', 'FontSize', 16);
 if ~isempty(h_salita) && ~isempty(h_discesa)
-    legend([h_salita, h_discesa], {'Carico (Loading)', 'Scarico (Unloading)'}, ...
-           'FontName', 'Times New Roman', 'Location', 'best');
+    legend([h_salita, h_discesa], {'Loading', 'Unloading'}, ...
+           'FontName', 'Times New Roman', 'Location', 'northeast');
 end
 set(gca, 'FontName', 'Times New Roman', 'FontSize', 14);
 hold off;
